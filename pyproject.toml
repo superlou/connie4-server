@@ -9,4 +9,5 @@ dependencies = [
     "pyjwt>=2.10.1",
     "python-dotenv>=1.1.1",
     "requests>=2.32.4",
+    "sqlmodel>=0.0.24",
 ]

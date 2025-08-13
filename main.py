@@ -1,19 +1,41 @@
+from contextlib import asynccontextmanager
 import os
 from typing import Annotated
+import uuid
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, Response
+from fastapi import FastAPI, Depends, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 import jwt
-from pydantic import BaseModel
 import requests
+from sqlmodel import Session
+
+import db
+from models import User
 
 
 load_dotenv()
 
 
-app = FastAPI()
+engine = db.get_engine()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.create_db_and_tables(engine)
+    yield
+
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+
+SessionDep = Annotated[Session, Depends(get_session)]
+
+
+app = FastAPI(lifespan=lifespan)
 
 origins = [
     "http://localhost:4200",
@@ -36,12 +58,6 @@ WEB_REDIRECT_URI = os.environ["WEB_REDIRECT_URI"]
 BACKEND_JWT_KEY = os.environ["BACKEND_JWT_KEY"]
 
 
-class User(BaseModel):
-    username: str
-    email: str
-    token: str
-
-
 @app.get("/")
 async def get_root():
     return "Connie4 Server"
@@ -57,15 +73,10 @@ async def login_google(web: bool = False):
     return {"url": url}
 
 
-users = {}
-
-
-def add_user():
-    pass
-
-
 @app.get("/auth/google")
-async def auth_google(code: str, response: Response, web: bool = False):
+async def auth_google(
+    code: str, response: Response, session: SessionDep, web: bool = False
+):
     token_url = "https://accounts.google.com/o/oauth2/token"
     data = {
         "code": code,
@@ -81,51 +92,41 @@ async def auth_google(code: str, response: Response, web: bool = False):
         headers={"Authorization": f"Bearer {access_token}"},
     )
 
+    user = User(
+        email=user_info.json()["email"],
+        google_access_token=access_token,
+    )
+    user.create_or_update(session)
+
     backend_token = jwt.encode(
-        {"email": user_info.json()["email"]},
-        BACKEND_JWT_KEY,
-        algorithm="HS256"
+        {"email": user.email}, BACKEND_JWT_KEY, algorithm="HS256"
     )
 
-    return {
-        "token": backend_token
-    }
+    return {"token": backend_token}
 
 
 @app.get("/token")
 async def get_token(token: Annotated[str, Depends(oauth2_scheme)]):
+    # todo Not sure how this fits into things
     return jwt.decode(token, GOOGLE_CLIENT_SECRET, algorithms=["HS256"])
 
 
-def user_from_token(token):
-    return User(
-        username="Fake User",
-        email="fake@user.com",
-        token=token,
-    )
-
-
-async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
-    print(f"{token=}")
-    user = user_from_token(token)
-    return user
+async def get_current_user(
+    token: Annotated[str, Depends(oauth2_scheme)], session: SessionDep
+) -> User:
+    token_data = jwt.decode(token, BACKEND_JWT_KEY, algorithms=["HS256"])
+    user = session.get(User, token_data["email"])
+    if user:
+        return user
+    else:
+        raise HTTPException(status_code=404, detail="No current user found")
 
 
 @app.get("/events")
 async def read_events(current_user: Annotated[User, Depends(get_current_user)]):
-    print(current_user)
     return {
-        "data": [{
-            "type": "event",
-            "id": 12532,
-            "attributes": {
-                "name": "Event 1"
-            }
-        }, {
-            "type": "event",
-            "id": 6782,
-            "attributes": {
-                "name": "Event 2"
-            }
-        }]
+        "data": [
+            {"type": "event", "id": 12532, "attributes": {"name": "Event 1"}},
+            {"type": "event", "id": 6782, "attributes": {"name": "Event 2"}},
+        ]
     }
