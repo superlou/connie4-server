@@ -13,5 +13,3 @@ class User(SQLModel, table=True):
         else:
             session.add(self)
             session.commit()
-
-        print(self)
